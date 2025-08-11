@@ -1,0 +1,221 @@
+from flask import Flask, render_template_string, request, jsonify
+import pandas as pd
+import os
+from bs4 import BeautifulSoup
+import requests
+
+app = Flask(__name__)
+
+def clean_pos_column(df):
+    if "POS" in df.columns:
+        df = df.copy()
+        df["POS"] = df["POS"].str.replace(r"\d+", "", regex=True)
+    return df
+
+def get_sleeper_adp():
+    url = "https://www.fantasypros.com/nfl/adp/overall.php"
+    response = requests.get(url)
+    if response.status_code != 200:
+        return pd.DataFrame()
+    soup = BeautifulSoup(response.text, "html.parser")
+    table = soup.find("table", {"id": "data"})
+    if not table:
+        return pd.DataFrame()
+    headers = [th.text.strip() for th in table.find("thead").find_all("th")]
+    rows = []
+    for tr in table.find("tbody").find_all("tr"):
+        cells = [td.text.strip() for td in tr.find_all("td")]
+        if cells:
+            rows.append(cells)
+    df = pd.DataFrame(rows, columns=headers)
+    df = clean_pos_column(df)
+    columns_to_keep = [col for col in ["Player Team (Bye)", "POS", "Team", "Sleeper"] if col in df.columns]
+    return df[columns_to_keep] if columns_to_keep else pd.DataFrame()
+
+def get_underdog_adp():
+    url = "https://www.fantasypros.com/nfl/adp/best-ball-overall.php"
+    response = requests.get(url)
+    if response.status_code != 200:
+        return pd.DataFrame()
+    soup = BeautifulSoup(response.text, "html.parser")
+    table = soup.find("table", {"id": "data"})
+    if not table:
+        return pd.DataFrame()
+    headers = [th.text.strip() for th in table.find("thead").find_all("th")]
+    rows = []
+    for tr in table.find("tbody").find_all("tr"):
+        cells = [td.text.strip() for td in tr.find_all("td")]
+        if cells:
+            rows.append(cells)
+    df = pd.DataFrame(rows, columns=headers)
+    df = clean_pos_column(df)
+    columns_to_keep = [col for col in ["Player Team (Bye)", "POS", "Underdog"] if col in df.columns]
+    return df[columns_to_keep] if columns_to_keep else pd.DataFrame()
+
+def join_adp_data(platform):
+  df_sleeper = get_sleeper_adp()
+  df_underdog = get_underdog_adp()
+  required_cols = ["Player Team (Bye)", "POS"]
+  if not all(col in df_sleeper.columns for col in required_cols):
+    return pd.DataFrame()
+  if not all(col in df_underdog.columns for col in required_cols):
+    return pd.DataFrame()
+  merged = pd.merge(
+    df_sleeper,
+    df_underdog,
+    on=["Player Team (Bye)", "POS"],
+    how="outer"
+  )
+  # Choose ADP column based on platform
+  if platform == "sleeper":
+    merged["ADP"] = merged["Sleeper"]
+  else:
+    merged["ADP"] = merged["Underdog"]
+  columns_order = ["Player Team (Bye)", "POS", "ADP"]
+  merged = merged[columns_order]
+  return merged
+
+def load_rankings(platform):
+  filename = "my_rankings.csv"
+  adp_df = join_adp_data(platform).reset_index(drop=True)
+  if os.path.exists(filename):
+    try:
+      # Load only order columns
+      order_df = pd.read_csv(filename)
+      # Merge with current ADP data
+      merged = order_df.merge(adp_df[["Player Team (Bye)", "POS", "ADP"]], on=["Player Team (Bye)", "POS"], how="left")
+      merged["My Ranking"] = range(1, len(merged) + 1)
+      return merged
+    except Exception:
+      pass
+  # If no saved order, use ADP order
+  adp_df["My Ranking"] = adp_df.index + 1
+  return adp_df
+
+@app.route('/', methods=['GET', 'POST'])
+def home():
+    platform = request.form.get('platform', 'sleeper')
+    df = load_rankings(platform)
+    def safe_float(val):
+        try:
+            return float(val)
+        except:
+            return None
+    df["ADP_num"] = df["ADP"].apply(safe_float)
+    df["Diff"] = df["My Ranking"] - df["ADP_num"]
+    table_html = "<table id='rankings-table'><thead><tr><th>My Ranking</th><th>Player Team (Bye)</th><th>POS</th><th>ADP</th><th>Diff</th></tr></thead><tbody>"
+    for i, row in df.iterrows():
+        diff = row["Diff"]
+        color = "#fff"
+        if diff is not None:
+            try:
+                diff = float(diff)
+                maxDiff = 10
+                norm = max(-maxDiff, min(maxDiff, diff))
+                if norm < 0:
+                    pct = abs(norm) / maxDiff
+                    r = round(255 - 155 * pct)
+                    g = 255
+                    b = round(255 - 155 * pct)
+                    color = f"rgb({r},{g},{b})"
+                elif norm > 0:
+                    pct = norm / maxDiff
+                    r = 255
+                    g = round(255 - 155 * pct)
+                    b = round(255 - 155 * pct)
+                    color = f"rgb({r},{g},{b})"
+                else:
+                    color = "#fff"
+            except:
+                color = "#fff"
+        table_html += f"<tr><td>{row['My Ranking']}</td><td>{row['Player Team (Bye)']}</td><td>{row['POS']}</td><td>{row['ADP']}</td><td style='background:{color};'>{diff if diff is not None else ''}</td></tr>"
+    table_html += "</tbody></table>"
+    sortable_js = """
+<script src='https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js'></script>
+<script>
+  const tbody = document.querySelector('#rankings-table tbody');
+  function getTableData() {
+    let data = [];
+    Array.from(tbody.children).forEach(function(row, i) {
+      data.push({
+        "My Ranking": i + 1,
+        "Player Team (Bye)": row.children[1].textContent,
+        "POS": row.children[2].textContent,
+        "ADP": row.children[3].textContent
+      });
+    });
+    return data;
+  }
+  function saveRankings() {
+    const platform = document.getElementById('platform').value;
+    const rankings = getTableData();
+    fetch('/save_rankings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: platform, rankings: rankings })
+    });
+  }
+  function updateDiffs() {
+    Array.from(tbody.children).forEach(function(row, i) {
+      row.children[0].textContent = i + 1;
+      let adp = parseFloat(row.children[3].textContent);
+      let diff = null;
+      if (!isNaN(adp)) {
+        diff = (i + 1) - adp;
+      }
+      let color = '#fff';
+      if (diff !== null) {
+        let maxDiff = 10;
+        let norm = Math.max(-maxDiff, Math.min(maxDiff, diff));
+        if (norm < 0) {
+          let pct = Math.abs(norm) / maxDiff;
+          let r = Math.round(255 - 155 * pct);
+          let g = 255;
+          let b = Math.round(255 - 155 * pct);
+          color = `rgb(${r},${g},${b})`;
+        } else if (norm > 0) {
+          let pct = norm / maxDiff;
+          let r = 255;
+          let g = Math.round(255 - 155 * pct);
+          let b = Math.round(255 - 155 * pct);
+          color = `rgb(${r},${g},${b})`;
+        }
+      }
+      row.children[4].textContent = diff !== null ? diff : '';
+      row.children[4].style.background = color;
+    });
+  }
+  new Sortable(tbody, {
+    animation: 150,
+    onEnd: function () {
+      updateDiffs();
+      saveRankings();
+    }
+  });
+  updateDiffs();
+</script>
+"""
+    return f"""
+<form method='post'>
+  <label for='platform'>ADP Platform:</label>
+  <select name='platform' id='platform' onchange='this.form.submit()'>
+    <option value='sleeper' {'selected' if platform == 'sleeper' else ''}>Sleeper</option>
+    <option value='underdog' {'selected' if platform == 'underdog' else ''}>Underdog</option>
+  </select>
+</form>
+{table_html}
+{sortable_js}
+"""
+
+@app.route('/save_rankings', methods=['POST'])
+def save_rankings():
+  data = request.get_json()
+  rankings = data.get('rankings', [])
+  filename = "my_rankings.csv"
+  # Only save order columns
+  df = pd.DataFrame(rankings)[["Player Team (Bye)", "POS"]]
+  df.to_csv(filename, index=False)
+  return jsonify({'status': 'ok'})
+
+if __name__ == '__main__':
+    app.run(debug=True)
