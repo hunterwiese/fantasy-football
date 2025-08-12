@@ -92,45 +92,55 @@ def load_rankings(platform):
   adp_df["My Ranking"] = adp_df.index + 1
   return adp_df
 
+def safe_float(val):
+    try:
+        return float(val)
+    except:
+        return None
+
 @app.route('/', methods=['GET', 'POST'])
 def home():
-    platform = request.form.get('platform', 'sleeper')
-    df = load_rankings(platform)
-    def safe_float(val):
-        try:
-            return float(val)
-        except:
-            return None
-    df["ADP_num"] = df["ADP"].apply(safe_float)
-    df["Diff"] = df["My Ranking"] - df["ADP_num"]
-    table_html = "<table id='rankings-table'><thead><tr><th>My Ranking</th><th>Player Team (Bye)</th><th>POS</th><th>ADP</th><th>Diff</th></tr></thead><tbody>"
-    for i, row in df.iterrows():
-        diff = row["Diff"]
+  platform = request.form.get('platform', 'sleeper')
+  df = load_rankings(platform)
+  df["ADP_num"] = df["ADP"].apply(safe_float)
+  df["Diff"] = df["My Ranking"] - df["ADP_num"]
+  # Add POS Rank column
+  pos_ranks = []
+  for i, row in df.iterrows():
+    pos = row["POS"]
+    my_rank = row["My Ranking"]
+    y = (df[(df["POS"] == pos) & (df["My Ranking"] < my_rank)]).shape[0] + 1
+    pos_ranks.append(f"{pos}{y}")
+  df["POS Rank"] = pos_ranks
+
+  table_html = "<table id='rankings-table'><thead><tr><th>My Ranking</th><th>Player Team (Bye)</th><th>POS</th><th>POS Rank</th><th>ADP</th><th>Diff</th></tr></thead><tbody>"
+  for i, row in df.iterrows():
+    diff = row["Diff"]
+    color = "#fff"
+    if diff is not None:
+      try:
+        diff = float(diff)
+        maxDiff = 15
+        norm = max(-maxDiff, min(maxDiff, diff))
+        if norm < 0:
+          pct = abs(norm) / maxDiff
+          r = round(255 - 155 * pct)
+          g = 255
+          b = round(255 - 155 * pct)
+          color = f"rgb({r},{g},{b})"
+        elif norm > 0:
+          pct = norm / maxDiff
+          r = 255
+          g = round(255 - 155 * pct)
+          b = round(255 - 155 * pct)
+          color = f"rgb({r},{g},{b})"
+        else:
+          color = "#fff"
+      except:
         color = "#fff"
-        if diff is not None:
-            try:
-                diff = float(diff)
-                maxDiff = 15
-                norm = max(-maxDiff, min(maxDiff, diff))
-                if norm < 0:
-                    pct = abs(norm) / maxDiff
-                    r = round(255 - 155 * pct)
-                    g = 255
-                    b = round(255 - 155 * pct)
-                    color = f"rgb({r},{g},{b})"
-                elif norm > 0:
-                    pct = norm / maxDiff
-                    r = 255
-                    g = round(255 - 155 * pct)
-                    b = round(255 - 155 * pct)
-                    color = f"rgb({r},{g},{b})"
-                else:
-                    color = "#fff"
-            except:
-                color = "#fff"
-        table_html += f"<tr><td>{row['My Ranking']}</td><td>{row['Player Team (Bye)']}</td><td>{row['POS']}</td><td>{row['ADP']}</td><td style='background:{color};'>{diff if diff is not None else ''}</td></tr>"
-    table_html += "</tbody></table>"
-    sortable_js = """
+    table_html += f"<tr><td>{row['My Ranking']}</td><td>{row['Player Team (Bye)']}</td><td>{row['POS']}</td><td>{row['POS Rank']}</td><td>{row['ADP']}</td><td style='background:{color};'>{diff if diff is not None else ''}</td></tr>"
+  table_html += "</tbody></table>"
+  sortable_js = """
 <link href='https://fonts.googleapis.com/css?family=Inter:400,600&display=swap' rel='stylesheet'>
 <style>
   body {
@@ -252,9 +262,10 @@ def home():
     });
   }
   function updateDiffs() {
+    // First, update My Ranking and Diff/Color
     Array.from(tbody.children).forEach(function(row, i) {
       row.children[0].textContent = i + 1;
-      let adp = parseFloat(row.children[3].textContent);
+      let adp = parseFloat(row.children[4].textContent); // ADP is now col 4
       let diff = null;
       if (!isNaN(adp)) {
         diff = (i + 1) - adp;
@@ -277,8 +288,22 @@ def home():
           color = `rgb(${r},${g},${b})`;
         }
       }
-      row.children[4].textContent = diff !== null ? diff : '';
-      row.children[4].style.background = color;
+      row.children[5].textContent = diff !== null ? diff : '';
+      row.children[5].style.background = color;
+    });
+    // Now, update POS Rank for each row
+    let rows = Array.from(tbody.children);
+    rows.forEach(function(row, i) {
+      let pos = row.children[2].textContent;
+      // Count number of rows with same POS and lower My Ranking (index)
+      let y = 1;
+      for (let j = 0; j < rows.length; j++) {
+        if (j === i) continue;
+        if (rows[j].children[2].textContent === pos && j < i) {
+          y++;
+        }
+      }
+      row.children[3].textContent = pos + y;
     });
   }
   new Sortable(tbody, {
@@ -291,7 +316,7 @@ def home():
   updateDiffs();
 </script>
 """
-    return f"""
+  return f"""
 <div class="container">
   <h1>Fantasy Football Custom Rankings</h1>
   <form method='post'>
