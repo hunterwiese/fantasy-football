@@ -110,7 +110,7 @@ def home():
         if diff is not None:
             try:
                 diff = float(diff)
-                maxDiff = 10
+                maxDiff = 15
                 norm = max(-maxDiff, min(maxDiff, diff))
                 if norm < 0:
                     pct = abs(norm) / maxDiff
@@ -131,6 +131,102 @@ def home():
         table_html += f"<tr><td>{row['My Ranking']}</td><td>{row['Player Team (Bye)']}</td><td>{row['POS']}</td><td>{row['ADP']}</td><td style='background:{color};'>{diff if diff is not None else ''}</td></tr>"
     table_html += "</tbody></table>"
     sortable_js = """
+<link href='https://fonts.googleapis.com/css?family=Inter:400,600&display=swap' rel='stylesheet'>
+<style>
+  body {
+    font-family: 'Inter', Arial, sans-serif;
+    background: #f6f8fa;
+    margin: 0;
+    padding: 0;
+  }
+  .container {
+    max-width: 900px;
+    margin: 40px auto;
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    padding: 32px 24px 24px 24px;
+  }
+  h1 {
+    font-size: 2.2rem;
+    font-weight: 600;
+    margin-bottom: 18px;
+    color: #222;
+    letter-spacing: -1px;
+  }
+  form {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  label {
+    font-weight: 600;
+    color: #444;
+    font-size: 1.05rem;
+  }
+  select {
+    font-size: 1rem;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #d0d7de;
+    background: #f6f8fa;
+    color: #222;
+    font-family: inherit;
+    transition: border 0.2s;
+  }
+  select:focus {
+    border-color: #0074d9;
+    outline: none;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    font-size: 1rem;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  }
+  thead {
+    background: #f0f4f8;
+  }
+  th, td {
+    padding: 12px 10px;
+    text-align: left;
+  }
+  th {
+    font-weight: 600;
+    color: #333;
+    border-bottom: 2px solid #eaecef;
+  }
+  tr {
+    transition: background 0.15s;
+  }
+  tbody tr:hover {
+    background: #f6f8fa;
+  }
+  td {
+    border-bottom: 1px solid #eaecef;
+    color: #222;
+  }
+  td:last-child {
+    font-weight: 600;
+    text-align: center;
+    border-left: 1px solid #eaecef;
+  }
+  @media (max-width: 700px) {
+    .container {
+      padding: 12px 4px;
+    }
+    table, thead, tbody, th, td, tr {
+      font-size: 0.95rem;
+    }
+    th, td {
+      padding: 8px 4px;
+    }
+  }
+</style>
 <script src='https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js'></script>
 <script>
   const tbody = document.querySelector('#rankings-table tbody');
@@ -196,14 +292,17 @@ def home():
 </script>
 """
     return f"""
-<form method='post'>
-  <label for='platform'>ADP Platform:</label>
-  <select name='platform' id='platform' onchange='this.form.submit()'>
-    <option value='sleeper' {'selected' if platform == 'sleeper' else ''}>Sleeper</option>
-    <option value='underdog' {'selected' if platform == 'underdog' else ''}>Underdog</option>
-  </select>
-</form>
-{table_html}
+<div class="container">
+  <h1>Fantasy Football Custom Rankings</h1>
+  <form method='post'>
+    <label for='platform'>ADP Platform:</label>
+    <select name='platform' id='platform' onchange='this.form.submit()'>
+      <option value='sleeper' {'selected' if platform == 'sleeper' else ''}>Sleeper</option>
+      <option value='underdog' {'selected' if platform == 'underdog' else ''}>Underdog</option>
+    </select>
+  </form>
+  {table_html}
+</div>
 {sortable_js}
 """
 
