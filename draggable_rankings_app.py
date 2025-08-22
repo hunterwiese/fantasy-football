@@ -1,8 +1,10 @@
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for, session
+from flask import Flask, request, jsonify
 import pandas as pd
 import os
 from bs4 import BeautifulSoup
 import requests
+from utils import add_pos_rank, add_diff, make_table_html, load_rankings
+from draft import draft_route
 
 app = Flask(__name__)
 app.secret_key = 'fantasy-draft-secret-key'
@@ -93,54 +95,14 @@ def load_rankings(platform):
   adp_df["My Ranking"] = adp_df.index + 1
   return adp_df
 
-def safe_float(val):
-    try:
-        return float(val)
-    except:
-        return None
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
   platform = request.form.get('platform', 'sleeper')
   df = load_rankings(platform)
-  df["ADP_num"] = df["ADP"].apply(safe_float)
-  df["Diff"] = df["My Ranking"] - df["ADP_num"]
-  # Add POS Rank column
-  pos_ranks = []
-  for i, row in df.iterrows():
-    pos = row["POS"]
-    my_rank = row["My Ranking"]
-    y = (df[(df["POS"] == pos) & (df["My Ranking"] < my_rank)]).shape[0] + 1
-    pos_ranks.append(f"{pos}{y}")
-  df["POS Rank"] = pos_ranks
-
-  table_html = "<table id='rankings-table'><thead><tr><th>My Ranking</th><th>Player Team (Bye)</th><th>POS</th><th>POS Rank</th><th>ADP</th><th>Diff</th></tr></thead><tbody>"
-  for i, row in df.iterrows():
-    diff = row["Diff"]
-    color = "#fff"
-    if diff is not None:
-      try:
-        diff = float(diff)
-        maxDiff = 15
-        norm = max(-maxDiff, min(maxDiff, diff))
-        if norm < 0:
-          pct = abs(norm) / maxDiff
-          r = round(255 - 155 * pct)
-          g = 255
-          b = round(255 - 155 * pct)
-          color = f"rgb({r},{g},{b})"
-        elif norm > 0:
-          pct = norm / maxDiff
-          r = 255
-          g = round(255 - 155 * pct)
-          b = round(255 - 155 * pct)
-          color = f"rgb({r},{g},{b})"
-        else:
-          color = "#fff"
-      except:
-        color = "#fff"
-    table_html += f"<tr><td>{row['My Ranking']}</td><td>{row['Player Team (Bye)']}</td><td>{row['POS']}</td><td>{row['POS Rank']}</td><td>{row['ADP']}</td><td style='background:{color};'>{diff if diff is not None else ''}</td></tr>"
-  table_html += "</tbody></table>"
+  df = add_diff(df)
+  df = add_pos_rank(df)
+  table_html = make_table_html(df, ["My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP", "Diff"], table_id='rankings-table', color_diff=True)
   sortable_js = """
 <link href='https://fonts.googleapis.com/css?family=Inter:400,600&display=swap' rel='stylesheet'>
 <style>
@@ -334,179 +296,9 @@ def home():
 </div>
 {sortable_js}
 """
-@app.route('/draft', methods=['GET', 'POST'])
-def draft():
-  platform = request.args.get('platform', 'sleeper')
-  df = load_rankings(platform)
-  # Calculate POS Rank for all players
-  pos_ranks = []
-  for i, row in df.iterrows():
-      pos = row["POS"]
-      my_rank = row["My Ranking"]
-      y = (df[(df["POS"] == pos) & (df["My Ranking"] < my_rank)]).shape[0] + 1
-      pos_ranks.append(f"{pos}{y}")
-  df["POS Rank"] = pos_ranks
-  df["ADP_num"] = df["ADP"].apply(safe_float)
-  df["Diff"] = df["My Ranking"] - df["ADP_num"]
-  # Show all players, no drafted logic
-  # Professional CSS styles
-  draft_css = """
-<link href='https://fonts.googleapis.com/css?family=Inter:400,600&display=swap' rel='stylesheet'>
-<style>
-  body {
-    font-family: 'Inter', Arial, sans-serif;
-    background: #f6f8fa;
-    margin: 0;
-    padding: 0;
-  }
-  .container {
-    max-width: 1100px;
-    margin: 40px auto;
-    background: #fff;
-    border-radius: 18px;
-    box-shadow: 0 6px 32px rgba(0,0,0,0.10);
-    padding: 40px 32px 32px 32px;
-  }
-  h1 {
-    font-size: 2.4rem;
-    font-weight: 700;
-    margin-bottom: 28px;
-    color: #222;
-    letter-spacing: -1px;
-    text-align: left;
-  }
-  .draft-flex {
-    display: flex;
-    gap: 40px;
-    align-items: flex-start;
-    justify-content: space-between;
-    overflow-x: auto;
-    min-width: 0;
-  }
-  .draft-board, .drafted-list {
-    background: #f9fafb;
-    border-radius: 14px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.04);
-    padding: 24px 18px 18px 18px;
-    flex: 1 1 0;
-    min-width: 320px;
-    max-width: 480px;
-  }
-  .draft-board {
-    margin-right: 0;
-  }
-  .drafted-list {
-    margin-left: 0;
-  }
-  h2 {
-    font-size: 1.35rem;
-    font-weight: 600;
-    margin-bottom: 18px;
-    color: #0074d9;
-    letter-spacing: -0.5px;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    background: #fff;
-    font-size: 1rem;
-    border-radius: 10px;
-    overflow: hidden;
-    box-shadow: 0 1px 6px rgba(0,0,0,0.03);
-  }
-  thead {
-    background: #f0f4f8;
-  }
-  th, td {
-    padding: 10px 8px;
-    text-align: left;
-  }
-  th {
-    font-weight: 600;
-    color: #333;
-    border-bottom: 2px solid #eaecef;
-    background: #f0f4f8;
-  }
-  tr {
-    transition: background 0.15s;
-  }
-  tbody tr:hover {
-    background: #f6f8fa;
-  }
-  td {
-    border-bottom: 1px solid #eaecef;
-    color: #222;
-  }
-  td:last-child {
-    font-weight: 600;
-    text-align: center;
-    border-left: 1px solid #eaecef;
-  }
-  @media (max-width: 900px) {
-    .container {
-      padding: 16px 4px;
-    }
-    .draft-flex {
-      flex-direction: row;
-      gap: 24px;
-      overflow-x: auto;
-    }
-    .draft-board, .drafted-list {
-      min-width: 320px;
-      max-width: 480px;
-      padding: 14px 4px 8px 4px;
-    }
-    table, thead, tbody, th, td, tr {
-      font-size: 0.97rem;
-    }
-    th, td {
-      padding: 7px 2px;
-    }
-  }
-  @media (max-width: 700px) {
-    .draft-flex {
-      flex-direction: row;
-      gap: 16px;
-      overflow-x: auto;
-    }
-    .draft-board, .drafted-list {
-      min-width: 280px;
-      max-width: 400px;
-    }
-  }
-</style>
-"""
 
-  board_html = "<div class='draft-board'><h2>Draft Board</h2>"
-  board_html += "<table><thead><tr>"
-  for col in ["My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP", "Diff"]:
-    board_html += f"<th>{col}</th>"
-  board_html += "</tr></thead><tbody>"
-  for _, row in df.iterrows():
-    board_html += f"<tr>"
-    for col in ["My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP", "Diff"]:
-      board_html += f"<td>{row[col]}</td>"
-    board_html += "</tr>"
-  board_html += "</tbody></table></div>"
-
-  drafted_html = "<div class='drafted-list'><h2>Players Drafted</h2>"
-  drafted_html += "<table><thead><tr>"
-  for col in ["My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP", "Diff"]:
-    drafted_html += f"<th>{col}</th>"
-  drafted_html += "</tr></thead><tbody>"
-  # Empty for now
-  drafted_html += "</tbody></table></div>"
-
-  return f"""
-{draft_css}
-<div class='container'>
-  <h1>Fantasy Football Draft Board</h1>
-  <div class='draft-flex'>
-    {board_html}
-    {drafted_html}
-  </div>
-</div>
-"""
+# Register draft route
+draft_route(app)
 
 @app.route('/save_rankings', methods=['POST'])
 def save_rankings():
