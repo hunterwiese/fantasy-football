@@ -1,88 +1,244 @@
 from flask import request, session, redirect, url_for
-from utils import load_rankings, add_diff, add_pos_rank, make_table_html
+from utils import load_rankings, add_diff, add_pos_rank
+import time
 
-# --- CSS Constant ---
-DRAFT_CSS = """
-<link href='https://fonts.googleapis.com/css?family=Inter:400,600&display=swap' rel='stylesheet'>
-<style>body {font-family: 'Inter', Arial, sans-serif; background: #f6f8fa; margin: 0; padding: 0;} .container {max-width: 1100px; margin: 40px auto; background: #fff; border-radius: 18px; box-shadow: 0 6px 32px rgba(0,0,0,0.10); padding: 40px 32px 32px 32px; position: relative;} h1 {font-size: 2.4rem; font-weight: 700; margin-bottom: 28px; color: #222; letter-spacing: -1px; text-align: left;} .end-draft-btn {position: absolute; top: 32px; right: 32px; z-index: 10;} .draft-flex {display: flex; gap: 40px; align-items: flex-start; justify-content: space-between; overflow-x: auto; min-width: 0;} .draft-board, .drafted-list {background: #f9fafb; border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,0.04); padding: 24px 18px 18px 18px; flex: 1 1 0; min-width: 320px; max-width: 480px;} .draft-board {margin-right: 0;} .drafted-list {margin-left: 0;} h2 {font-size: 1.35rem; font-weight: 600; margin-bottom: 18px; color: #0074d9; letter-spacing: -0.5px;} table {width: 100%; border-collapse: collapse; background: #fff; font-size: 1rem; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 6px rgba(0,0,0,0.03);} thead {background: #f0f4f8;} th, td {padding: 10px 8px; text-align: left;} th {font-weight: 600; color: #333; border-bottom: 2px solid #eaecef; background: #f0f4f8;} tr {transition: background 0.15s;} tbody tr:hover {background: #f6f8fa;} td {border-bottom: 1px solid #eaecef; color: #222;} td:last-child {font-weight: 600; text-align: center; border-left: 1px solid #eaecef;} @media (max-width: 900px) {.container {padding: 16px 4px;} .draft-flex {flex-direction: row; gap: 24px; overflow-x: auto;} .draft-board, .drafted-list {min-width: 320px; max-width: 480px; padding: 14px 4px 8px 4px;} table, thead, tbody, th, td, tr {font-size: 0.97rem;} th, td {padding: 7px 2px;}} @media (max-width: 700px) {.draft-flex {flex-direction: row; gap: 16px; overflow-x: auto;} .draft-board, .drafted-list {min-width: 280px; max-width: 400px;}}</style>
+# Small in-process cache to avoid recomputing rankings every request
+_CACHE_TTL = 30  # seconds
+_df_cache = {}   # { platform: {"df": DataFrame, "ts": float} }
+
+def _get_rankings_cached(platform: str):
+    now = time.time()
+    entry = _df_cache.get(platform)
+    if entry and (now - entry["ts"] < _CACHE_TTL):
+        # Return a shallow copy so filters don’t mutate cache
+        return entry["df"].copy(deep=False)
+    df = load_rankings(platform)
+    # Compute once; these are stable for a given platform/order
+    df = add_diff(df)
+    df = add_pos_rank(df)
+    # Precompute lowercase name key for fast, case-insensitive search
+    if "name_key" not in df.columns:
+        df["name_key"] = df["Player Team (Bye)"].astype(str).str.lower()
+    _df_cache[platform] = {"df": df, "ts": now}
+    return df.copy(deep=False)
+
+# Gradient color for Diff like on My Rankings (max magnitude = 10)
+def _diff_bg_color(diff, max_diff=10):
+    # NaN-safe
+    try:
+        if diff != diff:
+            return "#fff"
+    except Exception:
+        return "#fff"
+    # Clamp
+    norm = max(-max_diff, min(max_diff, float(diff)))
+    if norm < 0:
+        pct = abs(norm) / max_diff
+        r = round(255 - 155 * pct)
+        g = 255
+        b = round(255 - 155 * pct)
+        return f"rgb({r},{g},{b})"
+    elif norm > 0:
+        pct = norm / max_diff
+        r = 255
+        g = round(255 - 155 * pct)
+        b = round(255 - 155 * pct)
+        return f"rgb({r},{g},{b})"
+    return "#fff"
+
+def _render_board_table(board_df, pos_filter: str, q: str):
+    cols = ["My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP", "Diff", "Action"]
+    th = "".join(f"<th>{c}</th>" for c in cols)
+    rows = []
+    for idx, row in board_df.iterrows():
+        diff_val = row["Diff"] if (row["Diff"] == row["Diff"]) else None
+        diff_bg = _diff_bg_color(diff_val) if diff_val is not None else "#fff"
+        tds = [
+            f"<td>{row['My Ranking']}</td>",
+            f"<td>{row['Player Team (Bye)']}</td>",
+            f"<td>{row['POS']}</td>",
+            f"<td>{row['POS Rank']}</td>",
+            f"<td>{row['ADP']}</td>",
+            f"<td style='background:{diff_bg};'>{'' if diff_val is None else diff_val}</td>",
+            (
+                "<td>"
+                "<form method='POST' style='margin:0;'>"
+                f"<input type='hidden' name='drafted_idx' value='{idx}'/>"
+                f"<input type='hidden' name='pos' value='{pos_filter or ''}'/>"
+                f"<input type='hidden' name='q' value='{q or ''}'/>"
+                "<button class='btn btn-primary' type='submit'>Mark Drafted</button>"
+                "</form>"
+                "</td>"
+            ),
+        ]
+        rows.append(f"<tr>{''.join(tds)}</tr>")
+    return (
+        "<div class='card'>"
+        "<h2>Draft Board</h2>"
+        "<table class='table'><thead><tr>" + th + "</tr></thead>"
+        "<tbody>" + "".join(rows) + "</tbody></table>"
+        "</div>"
+    )
+
+def _render_drafted_table(drafted_df, drafted_order):
+    if drafted_df.empty:
+        return (
+            "<div class='card'>"
+            "<h2>Players Drafted</h2>"
+            "<div class='empty'>No players drafted yet.</div>"
+            "</div>"
+        )
+    # Map index -> draft position by order clicked
+    draft_pos_map = {idx: pos + 1 for pos, idx in enumerate(drafted_order)}
+    drafted_df = drafted_df.copy()
+    drafted_df["Draft Position"] = [draft_pos_map.get(ix, 0) for ix in drafted_df.index]
+    # Show newest draftees first
+    drafted_df.sort_values("Draft Position", ascending=False, inplace=True)
+
+    # Removed "Diff" column from the drafted table
+    cols = ["Draft Position", "My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP"]
+    th = "".join(f"<th>{c}</th>" for c in cols)
+    rows = []
+    for idx, row in drafted_df.iterrows():
+        tds = [
+            f"<td>{int(row['Draft Position'])}</td>",
+            f"<td>{row['My Ranking']}</td>",
+            f"<td>{row['Player Team (Bye)']}</td>",
+            f"<td>{row['POS']}</td>",
+            f"<td>{row['POS Rank']}</td>",
+            f"<td>{row['ADP']}</td>",
+        ]
+        rows.append(f"<tr>{''.join(tds)}</tr>")
+    return (
+        "<div class='card'>"
+        "<h2>Players Drafted</h2>"
+        "<table class='table'><thead><tr>" + th + "</tr></thead>"
+        "<tbody>" + "".join(rows) + "</tbody></table>"
+        "</div>"
+    )
+
+DRAFT_PAGE_CSS = """
+<style>
+  .container { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
+  .header { position: relative; display:flex; align-items:center; justify-content:center; }
+  .end-draft { position:absolute; right:0; top:0; }
+  .btn { cursor:pointer; border:none; border-radius:8px; padding:8px 14px; }
+  .btn-primary { background:#1664d9; color:#fff; }
+  .btn-danger  { background:#e74c3c; color:#fff; }
+  .grid { display:flex; gap:16px; }
+  .card { flex:1; background:#fff; border-radius:12px; padding:16px; box-shadow:0 2px 10px rgba(0,0,0,0.06); min-width: 460px; }
+  .table { width:100%; border-collapse:collapse; }
+  .table th, .table td { padding:10px; border-bottom:1px solid #eaecef; text-align:left; }
+  .table thead th { background:#f4f6f8; }
+  .empty { color:#6b7280; font-style:italic; padding:8px 0; }
+  @media (max-width: 1100px) {
+    .grid { overflow-x:auto; }
+    .card { min-width:540px; }
+  }
+</style>
 """
 
 def draft_route(app):
     @app.route('/draft', methods=['GET', 'POST'])
     def draft():
-        # Handle End Draft action
-        if request.method == 'POST' and request.form.get('end_draft') == '1':
-            session['drafted_players'] = []
-            return redirect(url_for('home'))
         platform = request.args.get('platform', 'sleeper')
-        # Initialize drafted players in session if not present
-        if 'drafted_players' not in session:
-            session['drafted_players'] = []
+        pos_filter = request.args.get('pos', '')  # '' means All
+        q = request.args.get('q', '').strip()
 
-        # Handle marking a player as drafted
-        if request.method == 'POST' and request.form.get('drafted_idx') is not None:
-            drafted_idx = int(request.form.get('drafted_idx'))
-            drafted_players = session.get('drafted_players', [])
-            drafted_players.append(drafted_idx)
-            session['drafted_players'] = drafted_players
+        # Initialize drafted list
+        drafted_order = session.get('drafted_players', []) or []
 
-        df = load_rankings(platform)
-        df = add_diff(df)
-        df = add_pos_rank(df)
+        if request.method == 'POST':
+            # Preserve current filters on POST
+            pos_filter = request.form.get('pos', pos_filter)
+            q = request.form.get('q', q).strip()
 
-        # Split into draft board and drafted players
-        drafted_players = session.get('drafted_players', [])
-        board_df = df[~df.index.isin(drafted_players)]
-        drafted_df = df[df.index.isin(drafted_players)]
-        # Add Draft Position column based on order in drafted_players
-        if not drafted_df.empty:
-            draft_pos_map = {idx: pos+1 for pos, idx in enumerate(drafted_players)}
-            drafted_df = drafted_df.copy()
-            drafted_df['Draft Position'] = [draft_pos_map[idx] for idx in drafted_df.index]
+            # End Draft
+            if request.form.get('end_draft') == '1':
+                session['drafted_players'] = []
+                return redirect(url_for('home'))
 
-        # Generate HTML for draft board with buttons
-        board_html = "<div class='draft-board'><h2>Draft Board</h2><table><thead><tr>"
-        columns = ["My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP", "Diff", "Action"]
-        for col in columns:
-            board_html += f"<th>{col}</th>"
-        board_html += "</tr></thead><tbody>"
-        for idx, row in board_df.iterrows():
-            board_html += "<tr>"
-            for col in columns[:-1]:
-                board_html += f"<td>{row[col]}</td>"
-            # Add Mark Drafted button
-            board_html += (
-                f"<td>"
-                f"<form method='POST' style='margin:0;'>"
-                f"<input type='hidden' name='drafted_idx' value='{idx}'/>"
-                f"<button type='submit'>Mark Drafted</button>"
-                f"</form>"
-                f"</td>"
-            )
-            board_html += "</tr>"
-        board_html += "</tbody></table></div>"
+            # Mark Drafted (PRG)
+            drafted_idx = request.form.get('drafted_idx')
+            if drafted_idx is not None:
+                try:
+                    drafted_idx = int(drafted_idx)
+                except ValueError:
+                    return redirect(url_for('draft', platform=platform, pos=pos_filter or None, q=q or None))
+                if drafted_idx not in drafted_order:
+                    drafted_order.append(drafted_idx)
+                    session['drafted_players'] = drafted_order
+                return redirect(url_for('draft', platform=platform, pos=pos_filter or None, q=q or None))
 
-        # Drafted players table
-        if not drafted_df.empty and 'Draft Position' in drafted_df.columns:
-            drafted_df = drafted_df.sort_values('Draft Position')
-        drafted_html = "<div class='drafted-list'><h2>Players Drafted</h2>"
-        drafted_html += make_table_html(drafted_df, ["Draft Position", "My Ranking", "Player Team (Bye)", "POS", "POS Rank", "ADP", "Diff"], color_diff=True)
-        drafted_html += "</div>"
+        # Get cached rankings
+        df = _get_rankings_cached(platform)
 
-        # End Draft button HTML (top right)
-        end_draft_html = ("<form method='POST' class='end-draft-btn'>"
-                         "<input type='hidden' name='end_draft' value='1'/>"
-                         "<button type='submit' style='background:#e74c3c;color:#fff;padding:10px 18px;border:none;border-radius:8px;font-size:1.1rem;cursor:pointer;'>End Draft</button>"
-                         "</form>")
+        # Split into board and drafted
+        drafted_set = set(drafted_order)
+        board_df = df.loc[~df.index.isin(drafted_set)]
+        drafted_df = df.loc[df.index.isin(drafted_set)]
+
+        # Apply POS filter if selected
+        if pos_filter:
+            board_df = board_df[board_df['POS'] == pos_filter]
+            drafted_df = drafted_df[drafted_df['POS'] == pos_filter]
+
+        # Apply fast substring filter on player name (case-insensitive)
+        if q:
+            key = q.lower()
+            # Use precomputed lowercase column and regex=False for speed
+            if 'name_key' not in board_df.columns:
+                # In case of sliced DF losing the column (shouldn't happen), recompute cheaply
+                board_df = board_df.assign(name_key=board_df["Player Team (Bye)"].astype(str).str.lower())
+            if 'name_key' not in drafted_df.columns and not drafted_df.empty:
+                drafted_df = drafted_df.assign(name_key=drafted_df["Player Team (Bye)"].astype(str).str.lower())
+            board_df = board_df[board_df['name_key'].str.contains(key, regex=False, na=False)]
+            drafted_df = drafted_df[drafted_df['name_key'].str.contains(key, regex=False, na=False)]
+
+        # Build position filter options from full DF (so options don’t disappear)
+        positions = sorted(p for p in df['POS'].dropna().unique().tolist())
+        pos_options = ["<option value=''>All</option>"] + [
+            f"<option value='{p}'{' selected' if p == pos_filter else ''}>{p}</option>"
+            for p in positions
+        ]
+        # Filter/search form: submit via Enter or Apply button
+        filter_form = (
+            "<form method='get' class='filter' style='margin:0 0 16px 0; display:flex; gap:10px; align-items:center;'>"
+            f"<input type='hidden' name='platform' value='{platform}'>"
+            "<label for='pos' style='font-weight:600;color:#444;'>Position:</label>"
+            f"<select name='pos' id='pos'>{''.join(pos_options)}</select>"
+            "<label for='q' style='font-weight:600;color:#444;margin-left:10px;'>Search:</label>"
+            f"<input type='text' id='q' name='q' value='{q}' placeholder='Search players...' "
+            "style='padding:6px 10px; border:1px solid #d0d7de; border-radius:6px; min-width:220px;'>"
+            "<button type='submit' class='btn btn-primary' style='margin-left:8px;'>Apply</button>"
+            "</form>"
+        )
+
+        # Render tables
+        board_html = _render_board_table(board_df, pos_filter, q)
+        drafted_html = _render_drafted_table(drafted_df, drafted_order)
+
+        # End Draft button (preserve filters)
+        end_draft_html = (
+            "<form method='POST' class='end-draft' style='position:absolute; right:0; top:0;'>"
+            "<input type='hidden' name='end_draft' value='1'/>"
+            f"<input type='hidden' name='pos' value='{pos_filter or ''}'/>"
+            f"<input type='hidden' name='q' value='{q or ''}'/>"
+            "<button class='btn btn-danger' type='submit'>End Draft</button>"
+            "</form>"
+        )
 
         return f"""
-    {DRAFT_CSS}
-    <div class='container'>
-        {end_draft_html}
-        <h1>Fantasy Football Draft Board</h1>
-        <div class='draft-flex'>
-            {board_html}
-            {drafted_html}
-        </div>
-    </div>
-    """
+{DRAFT_PAGE_CSS}
+<div class="container">
+  <div class="header">
+    <h1>Fantasy Football Draft Board</h1>
+    {end_draft_html}
+  </div>
+  {filter_form}
+  <div class="grid">
+    {board_html}
+    {drafted_html}
+  </div>
+</div>
+"""
